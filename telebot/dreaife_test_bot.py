@@ -4,7 +4,8 @@ import logging
 from logging.handlers import TimedRotatingFileHandler
 from dotenv import load_dotenv
 import sys
-import os
+import argparse
+from pathlib import Path
 
 # 添加项目根目录到Python路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,37 +16,95 @@ from ai_plugins.ai_manager import AIManager
 # 加载环境变量
 load_dotenv()
 
-def setup_logging():
-    # 创建日志目录
-    log_dir = "/logs/bot/telebot/dreaife_test_bot/"
-    os.makedirs(log_dir, exist_ok=True)
+# 解析命令行参数
+def parse_args():
+    parser = argparse.ArgumentParser(description='Telegram Bot 服务')
+    parser.add_argument('--bot-name', type=str, default='dreaife_test_bot',
+                        help='Bot 名称，用于日志和数据目录 (默认: dreaife_test_bot)')
+    parser.add_argument('--log-dir', type=str, default=None,
+                        help='日志目录路径 (默认: /logs/bot/<bot-name>/)')
+    parser.add_argument('--data-dir', type=str, default=None,
+                        help='数据目录路径 (默认: /data/bot/<bot-name>/)')
+    return parser.parse_args()
 
-    # 设置日志文件名（基础文件名），TimmedRotatingFileHandler 会在滚动时自动在后面添加日期后缀
-    log_file = os.path.join(log_dir, "bot.log")
+def setup_logging(bot_name, log_dir=None):
+    """
+    设置日志配置
+    :param bot_name: Bot 名称
+    :param log_dir: 自定义日志目录，如果为 None 则使用默认路径
+    """
+    # 如果未指定日志目录，使用系统级默认路径 /logs/bot/<bot_name>
+    if log_dir is None:
+        log_dir = Path("/logs") / "bot" / bot_name
+    else:
+        log_dir = Path(log_dir)
+    
+    # 创建日志目录（如果不存在）
+    log_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 设置日志文件名
+    log_file = log_dir / "telebot.log"
 
-    # 创建 TimedRotatingFileHandler，每天滚动一次，最多保留 30 天的日志（可根据需要调整）
+    # 创建 TimedRotatingFileHandler，每天滚动一次，最多保留 30 天的日志
     handler = TimedRotatingFileHandler(
-        filename=log_file,
+        filename=str(log_file),
         when="midnight",     # 每天午夜滚动
         interval=1,
         backupCount=30,
         encoding='utf-8'
     )
-    # 配置文件后缀名，滚动后的文件格式将为 bot.log.YYYY-MM-DD
+    # 配置文件后缀名，滚动后的文件格式将为 telebot.log.YYYY-MM-DD
     handler.suffix = "%Y-%m-%d"
 
     # 设置日志格式
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
     handler.setFormatter(formatter)
 
     # 获取全局日志记录器，并添加 handler
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)  # 根据需求也可以选择 DEBUG
+    
+    # 清除已有的 handlers，避免重复
+    logger.handlers.clear()
     logger.addHandler(handler)
+    
+    # 同时输出到控制台
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    
+    logger.info(f"日志目录: {log_dir}")
+    logger.info(f"日志文件: {log_file}")
+    
     return logger
 
+def setup_data_dir(bot_name, data_dir=None):
+    """
+    设置数据目录
+    :param bot_name: Bot 名称
+    :param data_dir: 自定义数据目录，如果为 None 则使用默认路径
+    :return: 数据目录路径
+    """
+    # 如果未指定数据目录，使用系统级默认路径 /data/bot/<bot_name>
+    if data_dir is None:
+        data_dir = Path("/data") / "bot" / bot_name
+    else:
+        data_dir = Path(data_dir)
+    
+    # 创建数据目录（如果不存在）
+    data_dir.mkdir(parents=True, exist_ok=True)
+    
+    return data_dir
+
+# 解析命令行参数
+args = parse_args()
+
 # 设置日志配置
-logger = setup_logging()
+logger = setup_logging(args.bot_name, args.log_dir)
+
+# 设置数据目录
+data_dir = setup_data_dir(args.bot_name, args.data_dir)
+logger.info(f"数据目录: {data_dir}")
 
 # 从环境变量读取 Telegram Bot Token
 TOKEN = os.getenv('TELEGRAM_BOT_DREAIFE_TOKEN')
@@ -105,6 +164,7 @@ async def help_command(update, context):
 
 def main():
     # 使用 Application.builder() 构建应用程序
+    assert TOKEN is not None, "TOKEN 不能为 None"
     application = Application.builder().token(TOKEN).build()
 
     # 添加处理器

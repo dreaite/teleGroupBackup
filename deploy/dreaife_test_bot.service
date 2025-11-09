@@ -1,0 +1,22 @@
+[Unit]
+Description=Telegram Bot Service - dreaife_test_bot
+After=network.target
+
+[Service]
+Type=simple
+User=dreaife
+WorkingDirectory=/home/dreaife/bot
+# 在 ExecStartPre 中确保目录存在并且属于 dreaife 用户
+ExecStartPre=/bin/mkdir -p /logs/bot/dreaife_test_bot
+ExecStartPre=/bin/mkdir -p /data/bot/dreaife_test_bot
+ExecStartPre=/bin/chown -R dreaife:dreaife /logs/bot/dreaife_test_bot /data/bot/dreaife_test_bot
+
+# 使用项目的 venv Python 运行脚本，并显式指定日志和数据目录
+ExecStart=/home/dreaife/bot/venv/bin/python /home/dreaife/bot/telebot/dreaife_test_bot.py --bot-name dreaife_test_bot --log-dir /logs/bot/dreaife_test_bot --data-dir /data/bot/dreaife_test_bot
+
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
