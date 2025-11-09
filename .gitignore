@@ -1,0 +1,12 @@
+# .env 文件
+.env
+
+# 环境
+venv/
+
+# 数据
+data/
+
+# 日志文件
+logs/*.log
+logs/
