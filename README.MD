@@ -1,20 +1,21 @@
-# myBotPlate 🤖
+# Telegram Group Backup 🤖
 
-一个基于 Python 的 Telegram 项目，包含 AI Bot 和群消息备份工具。
+一个强大的 Telegram 群组消息备份工具，基于 Python 和 Telethon 开发。
 
 ## ✨ 特性
 
-### AI Bot
-- 🧩 **插件化 AI 服务架构** - 支持 OpenAI、Gemini、Anthropic、Grok 等多种 AI 服务
-- 💬 **Telegram Bot 集成** - 基于 python-telegram-bot 框架
-- 🔒 **环境变量管理** - 使用 python-dotenv 安全管理敏感信息
-
-### 群消息备份工具 ⭐ NEW
-- 📝 **完整消息备份** - 使用你的账号实时转发群消息到备份群
-- ⚠️ **撤回消息检测** - 精准捕获并标注被撤回的消息
+### 群消息备份工具 ⭐ ENHANCED
+- 📝 **完整消息备份** - 实时转发源群消息到备份群，支持 N 对 N 映射
+- ⚠️ **撤回/编辑追踪** - 自动检测并标注被撤回或编辑的消息
+- ⏰ **定时备份** - 支持每日本地导出和每周远程上传备份
+- 🌏 **时区支持** - 自定义时区显示 (如 Asia/Tokyo)
 - 🎯 **全类型支持** - 文本、图片、视频、文件、语音等所有消息类型
-- 👤 **发送者追踪** - 保留原发送者姓名、用户名和时间信息
+- 👤 **发送者追踪** - 保留原发送者姓名、用户名，智能合并连续消息
 - 🔄 **自动映射** - 记录原消息和备份消息的对应关系
+- 💅 **精美排版** - 优化的消息展示样式，清晰的头部和底部信息
+
+### AI Bot (可选功能)
+- 🧩 **插件化架构** - 支持 OpenAI、Grok 等多种 AI 服务
 
 ## 📁 项目结构
 
@@ -88,22 +89,16 @@ source venv/bin/activate
 
 # 安装依赖
 pip install -r requirements.txt
-```
 
-### 2. 配置环境变量
-
-创建 `.env` 文件并添加必要的 API 密钥：
-
-```bash
-# AI Bot 配置
-OPENAI_API_KEY="your-openai-api-key"
-TELEGRAM_BOT_DREAIFE_TOKEN="your-telegram-bot-token"
-
-# 群消息备份配置 (可选)
-TELEGRAM_API_ID=12345678
-TELEGRAM_API_HASH=0123456789abcdef
-SOURCE_CHAT_ID=-1001234567890
-BACKUP_CHAT_ID=-1009876543210
+# 2. 配置
+# 配置文件 (映射关系 & 设置)
+cp telebot/group_backup_config.example.yml telebot/group_backup_config.yml
+nano telebot/group_backup_config.yml‘
+# 填入key,hash
+# 配置:
+# - 源群组 -> 目标群组的映射
+# - 时区设置 (默认 Asia/Tokyo)
+# - 定时备份计划
 ```
 
 ### 3. 启动程序
@@ -144,6 +139,9 @@ python3 telebot/group_backup_bot.py
 
 **群消息备份**:
 - `Telethon==1.38.1` - Telegram 用户客户端
+- `APScheduler==3.11.1` - 定时任务调度
+- `pytz==2025.2` - 时区处理
+- `PyYAML` - 配置文件解析
 - `python-dotenv==1.1.0` - 环境变量管理
 
 完整依赖列表见 [`requirements.txt`](requirements.txt)
@@ -153,11 +151,13 @@ python3 telebot/group_backup_bot.py
 ### 群消息备份工具
 
 **核心功能**:
-- ✅ 实时转发源群消息到备份群
-- ✅ 完整的撤回消息检测和标注
-- ✅ 支持所有消息类型(文本、图片、视频、文件、语音等)
-- ✅ 显示发送者信息和时间戳
-- ✅ 自动保存消息映射关系
+- ✅ **多对多备份**: 支持配置文件中定义多个源群组到多个目标群组的映射
+- ✅ **智能编辑处理**: 源消息被编辑时，备份消息自动更新并标注 `#已修改`
+- ✅ **撤回消息追踪**: 源消息被撤回时，尝试在原备份上更新 `#已撤回` 标签；若超时无法更新，则发送警告回复
+- ✅ **定时导出**:
+    - **每日备份**: 每天 04:00 (可配置) 自动导出当日本地消息记录
+    - **每周备份**: 每周一 04:00 (可配置) 自动打包过去7天消息上传至备份群
+- ✅ **高级排版**: 包含准确的时区时间、发送者信息、自定义标签和优化的分隔线
 
 **使用场景**:
 - 重要群组的消息备份
@@ -205,6 +205,10 @@ tail -f /logs/bot/group_backup/backup.log
 
 # 使用 systemd 服务(需先python运行一遍程序完成登录获取到session文件)
 sudo cp deploy/group_backup_bot.service /etc/systemd/system/
+# 填入group_backup_bot.py具体路径
+sudo nano /etc/systemd/system/group_backup_bot.service
+sudo systemctl daemon-reload
+sudo systemctl enable group_backup_bot
 sudo systemctl start group_backup_bot
 sudo systemctl status group_backup_bot
 ```

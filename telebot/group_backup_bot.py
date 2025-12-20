@@ -715,31 +715,31 @@ def main():
     else:
         data_dir = Path(args.data_dir)
     
-    # 从环境变量获取 API 配置
-    api_id = os.getenv("TELEGRAM_API_ID")
-    api_hash = os.getenv("TELEGRAM_API_HASH")
-    
     # 加载配置文件
     config = load_config(args.config)
     if not config:
         logger.error(f"无法加载配置文件: {args.config}")
         sys.exit(1)
+
+    # 从配置文件获取 API 配置
+    telegram_config = config.get('telegram', {})
+    api_id = telegram_config.get('api_id')
+    api_hash = telegram_config.get('api_hash')
     
     # 验证 API 配置
     if not api_id:
-        logger.error("未设置 TELEGRAM_API_ID 环境变量")
-        logger.error("请访问 https://my.telegram.org 获取 API ID 和 API Hash")
+        logger.error("配置文件中未找到 telegram.api_id")
+        logger.error("请在配置文件中添加:\ntelegram:\n  api_id: YOUR_API_ID\n  api_hash: YOUR_API_HASH")
         sys.exit(1)
     
     if not api_hash:
-        logger.error("未设置 TELEGRAM_API_HASH 环境变量")
-        logger.error("请访问 https://my.telegram.org 获取 API ID 和 API Hash")
+        logger.error("配置文件中未找到 telegram.api_hash")
         sys.exit(1)
     
     try:
         api_id = int(api_id)
     except ValueError:
-        logger.error("API_ID 必须是整数")
+        logger.error("telegram.api_id 必须是整数")
         sys.exit(1)
     
     # 创建并运行客户端
