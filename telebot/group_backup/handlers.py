@@ -144,8 +144,11 @@ class MessageHandler:
             
         backup_msgs = self.mapper.get_backup_msgs(chat_id, reply_to_msg_id)
         for bm in backup_msgs:
-            if bm['backup_chat_id'] == target_id:
-                return bm['backup_msg_id']
+            # Coerce to string for safe comparison (JSON ids might be loaded as int or str)
+            # target_id is usually int from core.py
+            bm_target_id = bm.get('backup_chat_id')
+            if str(bm_target_id) == str(target_id):
+                return bm.get('backup_msg_id')
         return None
 
     async def handle_edit_message(self, event):
