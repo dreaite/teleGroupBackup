@@ -395,26 +395,29 @@ class GroupBackupClient:
                     target_id = backup['backup_chat_id']
                     backup_msg_id = backup['backup_msg_id']
                     
+                    edit_success = False
                     try:
-                        # 1. 修改原消息，打上 #已撤回 标签
-                        # 获取原消息以保持Header
+                        # 1. 尝试修改原消息，打上 #已撤回 标签
                         old_backup_msg = await self.client.get_messages(target_id, ids=backup_msg_id)
                         if old_backup_msg:
                             current_text = old_backup_msg.text or ""
-                            # 追加标签 (简单追加即可，不去重，表示多次撤回?)
-                            # 或者是替换？
-                            # 既然已经撤回，意味着原内容没了。但在备份里我们希望保留原内容！
-                            # 所以只是 Append Tag。
-                            
                             new_text = current_text + f"\n\n#已撤回 `{recall_time}`"
                             await self.client.edit_message(target_id, backup_msg_id, new_text)
-                        
-                        # 2. 发送警告回复 (保持原有逻辑)
+                            edit_success = True
+                    except Exception as e:
+                        # 如果编辑失败(如超时), 则记录日志但不中断, 后续会在回复中添加tag
+                        self.logger.warning(f"无法编辑原消息 {backup_msg_id} (可能已超时): {e}")
+
+                    try:
+                        # 2. 发送警告回复
                         warning_text = (
                             f"⚠️ 消息已被撤回 ⚠️\n"
                             f"🕐 撤回时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                            # f"📝 原消息ID: {msg_id}" # 用户说"信息id就没必要显示了"
                         )
+                        
+                        # 如果无法编辑原消息(例如太久远), 则在回复中打上tag
+                        if not edit_success:
+                            warning_text += "\n#已撤回"
                         
                         await self.client.send_message(
                             target_id,
@@ -423,7 +426,7 @@ class GroupBackupClient:
                         )
                         
                     except Exception as e:
-                        self.logger.error(f"处理撤回消息失败 {backup}: {e}")
+                        self.logger.error(f"处理撤回消息回复失败 {backup}: {e}")
                         
         except Exception as e:
             self.logger.error(f"处理撤回事件时出错: {e}", exc_info=True)
@@ -478,13 +481,17 @@ def main():
     else:
         data_dir = Path(args.data_dir)
     
-    # 从环境变量获取配置
+    # 从环境变量获取 API 配置
     api_id = os.getenv("TELEGRAM_API_ID")
     api_hash = os.getenv("TELEGRAM_API_HASH")
-    source_chat_id = os.getenv("SOURCE_CHAT_ID")
-    backup_chat_id = os.getenv("BACKUP_CHAT_ID")
     
-    # 验证配置
+    # 加载配置文件
+    config = load_config(args.config)
+    if not config:
+        logger.error(f"无法加载配置文件: {args.config}")
+        sys.exit(1)
+    
+    # 验证 API 配置
     if not api_id:
         logger.error("未设置 TELEGRAM_API_ID 环境变量")
         logger.error("请访问 https://my.telegram.org 获取 API ID 和 API Hash")
@@ -495,28 +502,17 @@ def main():
         logger.error("请访问 https://my.telegram.org 获取 API ID 和 API Hash")
         sys.exit(1)
     
-    if not source_chat_id:
-        logger.error("未设置 SOURCE_CHAT_ID 环境变量")
-        sys.exit(1)
-    
-    if not backup_chat_id:
-        logger.error("未设置 BACKUP_CHAT_ID 环境变量")
-        sys.exit(1)
-    
     try:
         api_id = int(api_id)
-        source_chat_id = int(source_chat_id)
-        backup_chat_id = int(backup_chat_id)
     except ValueError:
-        logger.error("API_ID, SOURCE_CHAT_ID 和 BACKUP_CHAT_ID 必须是整数")
+        logger.error("API_ID 必须是整数")
         sys.exit(1)
     
     # 创建并运行客户端
     client = GroupBackupClient(
         api_id=api_id,
         api_hash=api_hash,
-        source_chat_id=source_chat_id,
-        backup_chat_id=backup_chat_id,
+        config=config,
         data_dir=data_dir,
         logger=logger,
         session_name=args.session_name
