@@ -13,14 +13,221 @@ from telethon.tl.types import MessageService
 import logging
 from logging.handlers import TimedRotatingFileHandler
 from dotenv import load_dotenv
-import os
-import sys
-import json
-import yaml  # Added yaml
+import yaml
 from pathlib import Path
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import pytz
 from datetime import datetime
+from datetime import timedelta
 import argparse
 import asyncio
+import os
+import json
+import sys
+
+class GroupBackupClient:
+    """群消息备份客户端"""
+    
+    def __init__(self, api_id: int, api_hash: str, config: dict, data_dir: Path, logger: logging.Logger,
+                 session_name: str = 'group_backup'):
+        self.api_id = api_id
+        self.api_hash = api_hash
+        self.config = config
+        self.logger = logger
+        self.mapper = MessageMapper(data_dir)
+        self.session_file = data_dir / f"{session_name}.session"
+        self.client = None
+        
+        # 解析配置，构建映射关系
+        # source_id -> [ {target_id, name, tag} ]
+        self.source_map = {}
+        # 记录每个目标群组的最后发送者，用于合并消息头
+        # target_id -> {last_sender_id, last_time}
+        self.chat_states = {}
+        
+        self._parse_config()
+        
+    def _parse_config(self):
+        """解析配置构建快速查找表"""
+        groups = self.config.get('groups', {})
+        for target_id, sources in groups.items():
+            try:
+                target_id = int(target_id)
+            except ValueError:
+                self.logger.error(f"Invalid target ID: {target_id}")
+                continue
+                
+    def start_scheduler(self):
+        """启动定时任务"""
+        schedule_config = self.config.get('settings', {}).get('backup_schedule', {})
+        if not schedule_config:
+            self.logger.info("未配置备份计划，跳过定时任务")
+            return
+
+        scheduler = AsyncIOScheduler()
+        timezone = self.config.get('settings', {}).get('timezone', 'Asia/Tokyo')
+        
+        # 每日备份
+        daily_time = schedule_config.get('daily_time', '04:00')
+        hour, minute = map(int, daily_time.split(':'))
+        scheduler.add_job(
+            self.run_daily_backup, 
+            'cron', 
+            hour=hour, 
+            minute=minute, 
+            timezone=timezone
+        )
+        self.logger.info(f"已计划每日备份: {daily_time} ({timezone})")
+
+        # 每周备份
+        weekly_day = schedule_config.get('weekly_day', 'mon')
+        weekly_time = schedule_config.get('weekly_time', '04:00')
+        # 如果 weekly_time 没有配置或者为空，可能导致split error，这里假设配置了或者默认有
+        if not weekly_time:
+             weekly_time = '04:00'
+             
+        w_hour, w_minute = map(int, weekly_time.split(':'))
+        
+        scheduler.add_job(
+            self.run_weekly_backup, 
+            'cron', 
+            day_of_week=weekly_day,
+            hour=w_hour, 
+            minute=w_minute, 
+            timezone=timezone
+        )
+        self.logger.info(f"已计划每周备份: {weekly_day} {weekly_time} ({timezone})")
+
+        scheduler.start()
+
+    async def _export_messages(self, chat_id: int, start_time: datetime, export_dir: Path, tag: str = "") -> Path:
+        """导出消息到文件"""
+        messages = []
+        async for msg in self.client.iter_messages(chat_id, offset_date=start_time, reverse=True):
+            if not msg.text and not msg.media:
+                continue
+                
+            msg_data = {
+                "id": msg.id,
+                "date": msg.date.isoformat(),
+                "sender_id": msg.sender_id,
+                "text": msg.text,
+                "reply_to": msg.reply_to_msg_id
+            }
+            messages.append(msg_data)
+
+        if not messages:
+            return None
+
+        # 文件名: GroupName_Date.bak (JSONL)
+        # 获取群名
+        try:
+            entity = await self.client.get_entity(chat_id)
+            chat_title = getattr(entity, 'title', str(chat_id))
+        except:
+            chat_title = str(chat_id)
+            
+        safe_title = "".join([c for c in chat_title if c.isalnum() or c in (' ', '-', '_')]).strip()
+        date_str = datetime.now().strftime('%Y-%m-%d')
+        filename = f"{safe_title}_{date_str}.bak"
+        
+        export_dir.mkdir(parents=True, exist_ok=True)
+        file_path = export_dir / filename
+        
+        with open(file_path, 'w', encoding='utf-8') as f:
+            for m in messages:
+                f.write(json.dumps(m, ensure_ascii=False) + '\n')
+        
+        return file_path
+
+    async def run_daily_backup(self):
+        """执行每日备份 (本地)"""
+        self.logger.info("开始执行每日备份...")
+        schedule_config = self.config.get('settings', {}).get('backup_schedule', {})
+        export_dir_str = schedule_config.get('local_export_dir', './data/exports')
+        export_dir = Path(export_dir_str)
+        
+        start_time = datetime.now(pytz.utc) - timedelta(hours=24)
+        
+        for source_id in self.source_map:
+            try:
+                path = await self._export_messages(source_id, start_time, export_dir)
+                if path:
+                    self.logger.info(f"每日备份成功: {path}")
+            except Exception as e:
+                self.logger.error(f"每日备份失败 {source_id}: {e}")
+
+    async def run_weekly_backup(self):
+        """执行每周备份 (上传)"""
+        self.logger.info("开始执行每周备份...")
+        schedule_config = self.config.get('settings', {}).get('backup_schedule', {})
+        # Use a temp dir for weekly
+        export_dir = Path("./data/temp_weekly")
+        
+        start_time = datetime.now(pytz.utc) - timedelta(days=7)
+        
+        for source_id, target_list in self.source_map.items():
+            try:
+                path = await self._export_messages(source_id, start_time, export_dir)
+                if path:
+                    # 获取该源群组对应的目标群组
+                    if target_list:
+                        target_id = target_list[0]['target_id']
+                        await self.client.send_file(
+                            target_id,
+                            path,
+                            caption=f"#备份 #{source_id} (Weekly)"
+                        )
+                        self.logger.info(f"每周备份上传成功: {path} -> {target_id}")
+                    
+                    # 删除临时文件
+                    os.remove(path)
+            except Exception as e:
+                self.logger.error(f"每周备份失败 {source_id}: {e}")
+                
+    async def start(self):
+        """启动客户端"""
+        self.logger.info("Starting backup bot...")
+        
+        self.client = TelegramClient(
+            str(self.session_file),
+            self.api_id,
+            self.api_hash
+        )
+        
+        await self.client.start()
+        
+        # 启动调度器
+        self.start_scheduler()
+        
+        # Collect source chats
+        source_chats = list(self.source_map.keys())
+        self.logger.info(f"Monitoring {len(source_chats)} source groups: {source_chats}")
+        
+        @self.client.on(events.NewMessage(chats=source_chats))
+        async def handler_new(event):
+            await self.handle_new_message(event)
+            
+        @self.client.on(events.MessageEdited(chats=source_chats))
+        async def handler_edit(event):
+            await self.handle_edit_message(event) 
+            
+        @self.client.on(events.MessageDeleted(chats=source_chats))
+        async def handler_delete(event):
+            await self.handle_deleted_message(event)
+
+        self.logger.info("Client started.")
+        await self.client.run_until_disconnected()
+
+    def run(self):
+        """同步运行方法"""
+        # APScheduler AsyncIOScheduler needs a running loop.
+        # client.run_until_disconnected() runs the loop.
+        # But if we use asyncio.run(self.start()), it creates a loop.
+        # It should work fine.
+        asyncio.run(self.start())
+
+
 
 # 加载环境变量
 load_dotenv()
@@ -242,6 +449,21 @@ class GroupBackupClient:
                 # 构建消息内容
                 msg_content = ""
                 
+                # 获取配置时区
+                timezone_str = self.config.get('settings', {}).get('timezone', 'Asia/Tokyo')
+                try:
+                    tz = pytz.timezone(timezone_str)
+                except Exception:
+                    tz = pytz.utc
+                
+                # 转换时间
+                msg_date = message.date.astimezone(tz)
+                time_str_full = msg_date.strftime('%Y-%m-%d %H:%M:%S') # HEADER
+                time_str_short = msg_date.strftime('%H:%M') # FOOTER
+
+                # 定义分隔线
+                separator = "─" * 30 + "\n"
+
                 # 头部 (如果是新发送者)
                 if should_send_header:
                     sender_username = f"@{sender.username}" if hasattr(sender, 'username') and sender.username else ""
@@ -253,15 +475,27 @@ class GroupBackupClient:
                     if target_info.get('tag'):
                         header += f" {target_info['tag']}"
                     
-                    msg_content += f"{header}\n"
+                    # Header 时间 (Line 3)
+                    header += f"\n🕐 {time_str_full} ({timezone_str})\n"
+                    
+                    if message.edit_date:
+                        header += "✏️ (已编辑)\n"
+                    
+                    header += separator
+                    
+                    msg_content += f"{header}"
+                else:
+                    # 如果不是第一条，也加上分隔线
+                    msg_content += separator
                 
                 # 消息主体 (如果有文本)
                 if message.text:
                     msg_content += message.text
                 
-                # 底部时间戳 (右下角风格，这里用简单的换行实现)
-                time_str = message.date.strftime('%H:%M')
-                msg_content += f"\n\n`{time_str}`"
+                # 底部时间戳 (如果不是第一条消息)
+                if not should_send_header:
+                    # 时间移动到现在的时间位置(底部), 向右对齐(Markdown无法真正右对齐，只能追加), 格式 YYYY-MM-DD HH:MM:SS
+                     msg_content += f"\n\n`{time_str_full}`"
                 
                 # 发送/转发
                 try:

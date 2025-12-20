@@ -1,5 +1,12 @@
 settings:
   auto_delete_ignore_days: 30 # Ignore deletions for messages older than X days
+  timezone: "Asia/Tokyo"
+  
+  backup_schedule:
+    daily_time: "04:00" # HH:MM (Local time)
+    local_export_dir: "/data/bot/group_backup/backups"
+    weekly_day: "mon" # Day of week for weekly backup
+    weekly_time: "04:00" # HH:MM (Local time)
 
 # Target Group ID -> Source Group ID -> Settings
 # Format:
