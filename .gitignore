@@ -1,6 +1,9 @@
 # .env 文件
 .env
 
+# 配置文件
+telebot/group_backup_config.yml
+
 # 环境
 venv/
 
@@ -10,3 +13,8 @@ data/
 # 日志文件
 logs/*.log
 logs/
+
+# 临时文件
+*.bak
+*.tmp
+**/__pycache__
