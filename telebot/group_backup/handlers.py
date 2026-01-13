@@ -219,7 +219,7 @@ class MessageHandler:
                     # 复杂处理需要重建 text，但这很难因为不知道原始 Header 格式，
                     # 所以仅追加编辑内容以保留原始消息。
                     current_backup = await self.client.get_messages(target_id, ids=backup_msg_id)
-                    if current_backup and current_backup.text:
+                    if current_backup:
                         timezone_str = self.config.get('settings', {}).get('timezone', 'Asia/Tokyo')
                         try:
                             tz = pytz.timezone(timezone_str)
@@ -234,9 +234,10 @@ class MessageHandler:
                             f"🕐 修改时间: {edit_time_str} ({timezone_str})\n"
                             f"{edited_text}"
                         )
-                        if edit_entry in current_backup.text:
+                        current_text = current_backup.text or ""
+                        if edit_entry in current_text:
                             continue
-                        new_text = f"{current_backup.text}\n\n{edit_entry}"
+                        new_text = f"{current_text}\n\n{edit_entry}" if current_text else edit_entry
                         await self.client.edit_message(target_id, backup_msg_id, new_text)
                             
                 except Exception as e:
