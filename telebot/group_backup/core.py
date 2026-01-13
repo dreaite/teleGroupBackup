@@ -33,20 +33,41 @@ class GroupBackupClient:
         self._parse_config()
         self.handler = MessageHandler(None, config, self.mapper, self.chat_states) # Client not set yet
 
+
+    def _parse_entity_id(self, id_val):
+        """Parses ID into (chat_id, topic_id)"""
+        s = str(id_val)
+        topic_id = None
+        
+        # Check for group_id.topic_id format
+        if '.' in s:
+            try:
+                parts = s.split('.')
+                chat_id = int(parts[0])
+                topic_id = int(parts[1])
+                return chat_id, topic_id
+            except ValueError:
+                self.logger.error(f"Invalid ID format: {id_val}")
+                return None, None
+                
+        try:
+            return int(s), None
+        except ValueError:
+            self.logger.error(f"Invalid ID: {id_val}")
+            return None, None
+
     def _parse_config(self):
         """解析配置构建快速查找表 (Source-Centric Config)"""
         groups = self.config.get('groups', {})
         # groups structure:
-        # SOURCE_ID:
-        #   targets: [TARGET_ID_1, TARGET_ID_2]
+        # SOURCE_ID or SOURCE_ID.TOPIC_ID:
+        #   targets: [TARGET_ID, TARGET_ID.TOPIC_ID]
         #   name: "..."
         #   tag: "..."
         
-        for source_id, source_info in groups.items():
-            try:
-                source_id = int(source_id)
-            except ValueError:
-                self.logger.error(f"Invalid source ID: {source_id}")
+        for source_key, source_info in groups.items():
+            source_id, source_topic_id = self._parse_entity_id(source_key)
+            if source_id is None:
                 continue
                 
             if source_id not in self.source_map:
@@ -55,28 +76,27 @@ class GroupBackupClient:
             info = source_info or {}
             
             # 兼容旧格式或直接读取 targets
-            # 如果 info 包含 targets 列表
             targets = info.get('targets', [])
             if not isinstance(targets, list):
-                # 可能是旧格式? 或者是单个ID?
-                # 假设用户可能写 targets: 123 (int)
-                if isinstance(targets, (int, str)):
+                if isinstance(targets, (int, str, float)):
                     targets = [targets]
                 else:
-                    self.logger.warning(f"Source {source_id} has invalid targets format: {targets}")
+                    self.logger.warning(f"Source {source_key} has invalid targets format: {targets}")
                     continue
             
             for tid in targets:
-                try:
-                    target_id = int(tid)
-                    entry = {
-                        'target_id': target_id,
-                        'name': info.get('name'),
-                        'tag': info.get('tag')
-                    }
-                    self.source_map[source_id].append(entry)
-                except ValueError:
-                    self.logger.error(f"Invalid target ID {tid} for source {source_id}")
+                target_id, target_topic_id = self._parse_entity_id(tid)
+                if target_id is None:
+                    continue
+                    
+                entry = {
+                    'target_id': target_id,
+                    'target_topic_id': target_topic_id,
+                    'source_topic_id': source_topic_id,
+                    'name': info.get('name'),
+                    'tag': info.get('tag')
+                }
+                self.source_map[source_id].append(entry)
 
     def start_scheduler(self):
         """启动定时任务"""

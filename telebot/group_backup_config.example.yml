@@ -36,3 +36,10 @@ groups:
       - -100888777666
     name: "Source B"
     tag: "#srcB"
+
+  # Example 3: Topic Support (Supergroup)
+  # Backup from Source C Topic 1 (ID: 1001) to Target C Topic 1 (ID: 1002)
+  # Format: "CHAT_ID.TOPIC_ID" (Must be quoted string)
+  "-100111222333.1001":
+    targets: ["-100444555666.1002"]
+    name: "Source C Topic 1"

@@ -13,6 +13,18 @@ class MessageHandler:
         self.chat_states = chat_states
         self.logger = logging.getLogger(__name__)
 
+    def _get_topic_id(self, message):
+        """Get the topic ID of the message if applicable"""
+        if not hasattr(message, 'reply_to') or not message.reply_to:
+            return None
+        
+        # In Telethon, reply_to attribute can check for forum topic
+        # reply_to_top_id is usually the topic ID for forum messages
+        # reply_to_msg_id might be topic ID if it is a direct reply to the topic creation message
+        if getattr(message.reply_to, 'forum_topic', False):
+             return message.reply_to.reply_to_top_id or message.reply_to.reply_to_msg_id
+        return None
+
     async def handle_new_message(self, event, target_info_list):
         """处理新消息分发"""
         try:
@@ -24,8 +36,17 @@ class MessageHandler:
             sender = await message.get_sender()
             sender_id = sender.id if sender else 0
             
+            # Get message topic ID (if any)
+            msg_topic_id = self._get_topic_id(message)
+            
             # 对每个目标群组进行转发
             for target_info in target_info_list:
+                # Source Topic Filtering
+                source_topic_id = target_info.get('source_topic_id')
+                if source_topic_id is not None:
+                    if msg_topic_id != source_topic_id:
+                        continue
+                        
                 target_id = target_info['target_id']
                 await self._process_single_target(message, sender, target_id, target_info)
                 
@@ -96,6 +117,11 @@ class MessageHandler:
 
         # 查找回复
         reply_to = self._find_reply_to(message.chat_id, message.reply_to_msg_id, target_id)
+        
+        # 如果未找到回复对象，且指定了目标 Topic，则回复到 Topic ID
+        target_topic_id = target_info.get('target_topic_id')
+        if not reply_to and target_topic_id:
+            reply_to = target_topic_id
 
         # 发送
         backup_msg = None
@@ -193,7 +219,7 @@ class MessageHandler:
                     # 复杂处理需要重建 text，但这很难因为不知道原始 Header 格式，
                     # 所以仅追加编辑内容以保留原始消息。
                     current_backup = await self.client.get_messages(target_id, ids=backup_msg_id)
-                    if current_backup and current_backup.text:
+                    if current_backup:
                         timezone_str = self.config.get('settings', {}).get('timezone', 'Asia/Tokyo')
                         try:
                             tz = pytz.timezone(timezone_str)
@@ -208,9 +234,10 @@ class MessageHandler:
                             f"🕐 修改时间: {edit_time_str} ({timezone_str})\n"
                             f"{edited_text}"
                         )
-                        if edit_entry in current_backup.text:
+                        current_text = current_backup.text or ""
+                        if edit_entry in current_text:
                             continue
-                        new_text = f"{current_backup.text}\n\n{edit_entry}"
+                        new_text = f"{current_text}\n\n{edit_entry}" if current_text else edit_entry
                         await self.client.edit_message(target_id, backup_msg_id, new_text)
                             
                 except Exception as e:
