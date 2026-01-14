@@ -6,7 +6,8 @@ from pathlib import Path
 from datetime import datetime, timedelta
 import pytz
 import json
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, utils
+from telethon.tl.types import UpdateMessageReactions
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from .mapper import MessageMapper
@@ -234,7 +235,14 @@ class GroupBackupClient:
             
         @self.client.on(events.MessageEdited(chats=source_chats))
         async def handler_edit(event):
+            # Strict filter at source: Ignore if triggered by Reaction
+            original_update = getattr(event, 'original_update', None)
+            if isinstance(original_update, UpdateMessageReactions) or \
+               (original_update and type(original_update).__name__ == 'UpdateMessageReactions'):
+                return
+            
             targets = self.source_map.get(event.chat_id, [])
+            # Also try matching without -100 prefix if needed? Usually event.chat_id is correct for high-level events.
             await self.handler.handle_edit_message(event, targets)
 
         @self.client.on(events.MessageDeleted(chats=source_chats))
@@ -242,6 +250,49 @@ class GroupBackupClient:
             if hasattr(event, 'chat_id') and event.chat_id:
                 targets = self.source_map.get(event.chat_id, [])
                 await self.handler.handle_deleted_message(event, targets)
+
+        @self.client.on(events.Raw)
+        async def handler_reaction(event):
+            if isinstance(event, UpdateMessageReactions):
+                peer_id = utils.get_peer_id(event.peer)
+                
+                # Telethon raw peer_id for channels lacks -100 prefix, but config has it.
+                # Try raw, then -100 prefixed.
+                targets = self.source_map.get(peer_id)
+                if not targets and peer_id > 0:
+                    potential_id = int(f"-100{peer_id}")
+                    targets = self.source_map.get(potential_id)
+
+                if not targets:
+                    return
+
+                # Pick the first reaction to satisfy "keep only one"
+                reaction_to_send = None
+                if event.reactions and event.reactions.results:
+                    reaction_to_send = event.reactions.results[0].reaction
+                    # Debug log
+                    # self.logger is not available in core?
+                    # Core `GroupBackupClient` has `self.logger`.
+                    self.logger.info(f"Reaction update on {peer_id} msg {event.msg_id}. Found {len(event.reactions.results)} reactions. Selected: {reaction_to_send}")
+                else:
+                     self.logger.info(f"Reaction update on {peer_id} msg {event.msg_id}. No reactions found (Clear).")
+                
+                # Mock event object for handler
+                class ReactionEvent:
+                    def __init__(self, m_id, c_id, react):
+                        self.msg_id = m_id
+                        self.chat_id = c_id # Use the ID that matched in source_map (to keep consistency)
+                        self.reaction = react
+                
+                # Which ID to pass as chat_id? The one used for lookup in Mapper.
+                matched_id = peer_id
+                if peer_id not in self.source_map and peer_id > 0:
+                     pid = int(f"-100{peer_id}")
+                     if pid in self.source_map:
+                         matched_id = pid
+                
+                mock_event = ReactionEvent(event.msg_id, matched_id, reaction_to_send)
+                await self.handler.handle_reaction(mock_event, targets)
             
         await self.client.run_until_disconnected()
 

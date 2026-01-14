@@ -2,7 +2,8 @@ import logging
 import pytz
 import asyncio
 from datetime import datetime
-from telethon.tl.types import MessageService, MessageMediaWebPage, Message
+from telethon.tl.types import MessageService, MessageMediaWebPage, Message, UpdateMessageReactions
+from telethon.tl.functions.messages import SendReactionRequest
 
 class MessageHandler:
     """处理消息逻辑"""
@@ -13,8 +14,15 @@ class MessageHandler:
         self.mapper = mapper
         self.chat_states = chat_states
         self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger(__name__)
         self._queues = {}
         self._workers = {}
+        self._album_buffers = {} # Key: (queue_key, grouped_id) -> [messages]
+
+    def _get_queue_key(self, target_info):
+        target_id = target_info['target_id']
+        target_topic_id = target_info.get('target_topic_id')
+        return (target_id, target_topic_id)
 
     async def _get_queue(self, target_id):
         if target_id not in self._queues:
@@ -30,10 +38,16 @@ class MessageHandler:
                 try:
                     if task_type == 'new':
                         await self._process_single_target(*args)
+                    elif task_type == 'album':
+                        await self._process_album_target(*args)
+                    elif task_type == 'album':
+                        await self._process_album_target(*args)
                     elif task_type == 'edit':
                         await self._process_edit_target(*args)
                     elif task_type == 'delete':
                         await self._process_delete_target(*args)
+                    elif task_type == 'reaction':
+                        await self._process_reaction_target(*args)
                 except Exception as e:
                     self.logger.error(f"Worker {target_id} error processing {task_type}: {e}", exc_info=True)
                 finally:
@@ -78,14 +92,58 @@ class MessageHandler:
                         continue
                         
                 target_id = target_info['target_id']
-                target_topic_id = target_info.get('target_topic_id')
-                queue_key = (target_id, target_topic_id)
-                self.logger.info(f"Queuing msg {message.id} from {chat_id} to {queue_key}")
-                queue = await self._get_queue(queue_key)
-                await queue.put(('new', (message, target_id, target_info)))
+                queue_key = self._get_queue_key(target_info)
                 
+                if message.grouped_id:
+                    # Handle Album
+                    await self._handle_grouped_message(message, target_info, queue_key)
+                else:
+                    self.logger.info(f"Queuing msg {message.id} from {chat_id} to {queue_key}")
+                    queue = await self._get_queue(queue_key)
+                    await queue.put(('new', (message, target_id, target_info)))
         except Exception as e:
             self.logger.error(f"处理新消息失败: {e}", exc_info=True)
+
+    async def _handle_grouped_message(self, message, target_info, queue_key):
+        """Buffer grouped messages and schedule flush"""
+        grouped_id = message.grouped_id
+        buffer_key = (queue_key, grouped_id)
+        
+        if buffer_key not in self._album_buffers:
+            self._album_buffers[buffer_key] = []
+            # Schedule flush
+            asyncio.create_task(self._flush_album(buffer_key, target_info, queue_key))
+            
+        self._album_buffers[buffer_key].append(message)
+
+    async def _flush_album(self, buffer_key, target_info, queue_key):
+        """Wait for album to complete then collect and queue"""
+        # Wait for other parts to arrive
+        await asyncio.sleep(2.0)
+        
+        messages = self._album_buffers.pop(buffer_key, [])
+        if not messages:
+            return
+            
+        # Sort by message ID to ensure order
+        messages.sort(key=lambda m: m.id)
+        
+        target_id = target_info['target_id']
+        self.logger.info(f"Queuing album {buffer_key[1]} ({len(messages)} msgs) to {queue_key}")
+        
+        queue = await self._get_queue(queue_key)
+        await queue.put(('album', (messages, target_id, target_info)))
+
+    def _get_fwd_sig(self, message):
+        """Get unique signature for forward source to detect context changes"""
+        if not message.fwd_from:
+            return None
+        # Telethon Peer objects str() are unique enough (e.g. PeerUser(id=123))
+        if message.fwd_from.from_id:
+            return str(message.fwd_from.from_id)
+        if message.fwd_from.from_name:
+            return message.fwd_from.from_name
+        return "unknown_forward"
 
     async def _process_single_target(self, message, target_id, target_info):
         """处理单个目标的转发逻辑"""
@@ -105,12 +163,19 @@ class MessageHandler:
         target_topic_id = target_info.get('target_topic_id')
         state_key = (target_id, target_topic_id) if target_topic_id else target_id
 
+        # Get fwd signature
+        fwd_sig = self._get_fwd_sig(message)
+
         # 检查是否需要发送头部
-        state = self.chat_states.get(state_key, {'last_sender_id': 0})
-        should_send_header = state['last_sender_id'] != sender_id
+        state = self.chat_states.get(state_key, {'last_sender_id': 0, 'last_fwd_sig': None})
+        
+        last_sender = state.get('last_sender_id')
+        last_fwd = state.get('last_fwd_sig')
+        
+        should_send_header = (last_sender != sender_id) or (last_fwd != fwd_sig)
         
         # 更新状态
-        self.chat_states[state_key] = {'last_sender_id': sender_id}
+        self.chat_states[state_key] = {'last_sender_id': sender_id, 'last_fwd_sig': fwd_sig}
         
         # 获取配置时区
         timezone_str = self.config.get('settings', {}).get('timezone', 'Asia/Tokyo')
@@ -126,30 +191,13 @@ class MessageHandler:
         # 判断是否为富媒体消息
         is_rich_media = bool(message.media and not isinstance(message.media, MessageMediaWebPage))
 
-        # 定义分隔线
-        separator = "" if is_rich_media else ("─" * 30 + "\n")
-
-        # 构建 Header
         header = ""
         if should_send_header:
-            sender_username = f"@{sender.username}" if hasattr(sender, 'username') and sender.username else ""
-            avatar_icon = self._build_avatar_icon(sender_name)
-            header = f"{avatar_icon} {sender_name} {sender_username}"
-            
-            if target_info.get('name'):
-                header += f"\n📢 {target_info['name']}"
-            if target_info.get('tag'):
-                header += f" {target_info['tag']}"
-            
-            header += f"\n🕐 {time_str_full} ({timezone_str})\n"
-            
-            if message.edit_date:
-                header += "✏️ (已编辑)\n"
-            
-            header += separator
-        elif not is_rich_media:
-             # 非第一条且非媒体 -> 不加分隔线
-             header = ""
+            header = self._build_message_header(sender, target_info, msg_date, timezone_str, bool(message.edit_date), message.fwd_from)
+            # Remove separator if rich media?
+            # Original logic: separator = "" if is_rich_media else ...
+            if is_rich_media:
+                 header = header.replace("─" * 30 + "\n", "")
 
         # 构建内容 (Header + Text + Footer)
         msg_content = header
@@ -185,6 +233,119 @@ class MessageHandler:
                 backup_msg.id,
                 target_topic_id
             )
+
+    async def _process_album_target(self, messages, target_id, target_info):
+        """处理相册转发"""
+        if not messages: return
+        
+        # Use first message for header/metadata info
+        first_msg = messages[0]
+        
+        # Fetch sender (try first msg)
+        try:
+            sender = await first_msg.get_sender()
+        except:
+            sender = None
+        sender_id = sender.id if sender else 0
+        sender_name = getattr(sender, 'first_name', 'Unknown')
+        if hasattr(sender, 'last_name') and sender.last_name:
+            sender_name += f" {sender.last_name}"
+
+        # Setup State & Header
+        queue_key = self._get_queue_key(target_info)
+        
+        # Get fwd signature
+        fwd_sig = self._get_fwd_sig(first_msg)
+
+        state = self.chat_states.get(queue_key, {'last_sender_id': 0, 'last_fwd_sig': None})
+        last_sender = state.get('last_sender_id')
+        last_fwd = state.get('last_fwd_sig')
+        
+        should_send_header = (last_sender != sender_id) or (last_fwd != fwd_sig)
+        
+        self.chat_states[queue_key] = {'last_sender_id': sender_id, 'last_fwd_sig': fwd_sig}
+
+        # Time Info
+        timezone_str = self.config.get('settings', {}).get('timezone', 'Asia/Tokyo')
+        try:
+            tz = pytz.timezone(timezone_str)
+        except:
+            tz = pytz.utc
+        msg_date = first_msg.date.astimezone(tz)
+        time_str_full = msg_date.strftime('%Y-%m-%d %H:%M:%S')
+
+        # Build Header
+        header = ""
+        if should_send_header:
+            header = self._build_message_header(
+                sender, target_info, msg_date, timezone_str, 
+                bool(first_msg.edit_date), first_msg.fwd_from
+            )
+            # Albums are always rich media, so strip separator
+            header = header.replace("─" * 30 + "\n", "")
+            # Add extra newline for visual separation in caption
+            header += "\n"
+
+        # Combine Text/Captions
+        # Logic: Concatenate all unique texts? Or just put header on first?
+        # Telegram albums share one caption usually, or separate?
+        # Actually client.send_file with list accepts 'caption' as str (for first) or list.
+        # We will put Header + Msg1 Text on first image.
+        # Subsequent images: their own text if any.
+        
+        # NOTE: Telegram API allows caption per media.
+        # We will attempt to preserve captions.
+        captions = []
+        for i, m in enumerate(messages):
+            cap = m.text or ""
+            if i == 0:
+                # Add Header to first message
+                cap = header + cap
+                # Add footer if needed? (Usually albums don't have footer seps)
+                if not should_send_header:
+                     # If continuation, maybe add small time tag?
+                     # cap += f"\n`{time_str_full}`"
+                     pass
+            captions.append(cap)
+            
+        # Reply Target
+        reply_to = self._find_reply_to(first_msg.chat_id, first_msg.reply_to_msg_id, target_id)
+        if not reply_to and target_info.get('target_topic_id'):
+            reply_to = target_info.get('target_topic_id')
+            
+        # Extract media
+        media_list = [m.media for m in messages]
+        
+        try:
+            sent_messages = await self.client.send_file(
+                target_id,
+                media_list,
+                caption=captions,
+                reply_to=reply_to
+            )
+            
+            # If single file sent (not list), wrap it
+            if not isinstance(sent_messages, list):
+                sent_messages = [sent_messages]
+                
+            # Map messages
+            # Assuming 1-to-1 mapping order is preserved by Telegram
+            if len(sent_messages) == len(messages):
+                for i, sent_m in enumerate(sent_messages):
+                    orig_m = messages[i]
+                    self.mapper.add_mapping(
+                        orig_m.chat_id,
+                        orig_m.id,
+                        target_id,
+                        sent_m.id,
+                        target_info.get('target_topic_id')
+                    )
+            else:
+                self.logger.warning(f"Album count mismatch: sent {len(sent_messages)}, orig {len(messages)}")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to send album to {target_id}: {e}", exc_info=True)
+
 
     async def _send_media(self, target_id, message, msg_content, should_send_header, time_str, reply_to):
         """发送媒体消息"""
@@ -239,6 +400,39 @@ class MessageHandler:
             return f"🧑[{sender_name[0]}]"
         return "🧑"
 
+    def _build_message_header(self, sender, target_info, msg_date, timezone_str, is_edit=False, fwd_from=None):
+        sender_name = getattr(sender, 'first_name', 'Unknown')
+        if hasattr(sender, 'last_name') and sender.last_name:
+            sender_name += f" {sender.last_name}"
+        
+        sender_username = f"@{sender.username}" if hasattr(sender, 'username') and sender.username else ""
+        avatar_icon = self._build_avatar_icon(sender_name)
+        header = f"{avatar_icon} {sender_name} {sender_username}"
+        
+        if target_info.get('name'):
+            header += f"\n📢 {target_info['name']}"
+        if target_info.get('tag'):
+            header += f" {target_info['tag']}"
+        
+        time_str_full = msg_date.strftime('%Y-%m-%d %H:%M:%S')
+        header += f"\n🕐 {time_str_full} ({timezone_str})\n"
+        
+        if is_edit:
+            header += "✏️ (已编辑)\n"
+
+        if fwd_from:
+            try:
+                fwd_name = fwd_from.from_name
+                # Fallback to implicit handling for hidden senders if needed
+                if fwd_name:
+                     header += f"↩️ 转发自: {fwd_name}\n"
+                else:
+                     header += "↩️ 转发消息\n"
+            except:
+                header += "↩️ 转发消息\n"
+
+        return header + ("─" * 30 + "\n")
+
     def _find_reply_to(self, chat_id, reply_to_msg_id, target_id):
         """查找回复目标ID"""
         if not reply_to_msg_id:
@@ -256,10 +450,25 @@ class MessageHandler:
     async def handle_edit_message(self, event, target_info_list):
         """处理消息编辑"""
         try:
+            original_update = getattr(event, 'original_update', None)
+            # Filter out Reaction updates that might trigger MessageEdited
+            if isinstance(original_update, UpdateMessageReactions) or \
+               (original_update and type(original_update).__name__ == 'UpdateMessageReactions'):
+                return
+
             msg = event.message
             chat_id = msg.chat_id
             msg_id = msg.id
             
+            update_type = type(original_update).__name__ if original_update else "Unknown"
+            # 降低日志级别，并记录 Update 类型以便排查
+            self.logger.debug(f"Message update received (checking for edit): Source {chat_id} Msg {msg_id} Type: {update_type}")
+
+            # Filter out events without edit_date (e.g. spurious updates or reactions interpreted as edits)
+            if not msg.edit_date:
+                self.logger.debug(f"Ignored edit event without edit_date: {msg_id}")
+                return
+
             # Use Mapping to determine where to send edits
             backups = self.mapper.get_backup_msgs(chat_id, msg_id)
             if not backups:
@@ -283,7 +492,8 @@ class MessageHandler:
     async def _process_edit_target(self, msg, target_id, backup_entry):
             # Worker now receives specific backup entry
             # No need to iterate all backups again or check IDs
-            
+            self.logger.info(f"Processing edit for Target {target_id} BackupEntry {backup_entry.get('backup_msg_id')}")
+
             # Verify target_id matches (should match as dispatched by key)
             if str(backup_entry['backup_chat_id']) != str(target_id):
                 return
@@ -310,10 +520,54 @@ class MessageHandler:
                         )
                         current_text = current_backup.text or ""
                         
-                        # Avoid duplicate edits check
-                        if edit_entry in current_text:
+                        # Strict De-duplication Logic
+                        should_skip = False
+                        
+                        # Case 1: Already has edits. Check the LAST edit entry.
+                        if "\n----\n" in current_text:
+                            last_segment = current_text.split("\n----\n")[-1]
+                            # Remove the Time header line from segment
+                            # Format: "🕐 修改时间: ...\nContent"
+                            if "🕐 修改时间:" in last_segment:
+                                try:
+                                    # Split by first newline after time
+                                    # Find first newline
+                                    first_nl = last_segment.find('\n')
+                                    if first_nl != -1:
+                                        last_content = last_segment[first_nl+1:]
+                                        if last_content.strip() == edited_text.strip():
+                                            should_skip = True
+                                except:
+                                    pass
+                        else:
+                            # Case 2: No edits yet. Compare against original.
+                            # Requires knowing the separator or structure.
+                            # Original: Header + Separator + Text + (Footer)
+                            # Separator: "─" * 30 + "\n"
+                            separator = "─" * 30 + "\n"
+                            
+                            clean_current = current_text
+                            if separator in clean_current:
+                                clean_current = clean_current.split(separator)[-1]
+                            
+                            # Remove Footer if present (Footer is time `202X-...`)
+                            # It's hard to distinguish footer from text.
+                            # But if matches exactly, good.
+                            if clean_current.strip() == edited_text.strip():
+                                should_skip = True
+                            
+                            # Fallback: If `edited_text` is present in `clean_current` EXACTLY (wrap check?)
+                            # If edited_text equals clean_current WITHOUT the footer?
+                            # Assume footer is short timestamp.
+                            # If clean_current starts with edited_text?
+                            if clean_current.strip().startswith(edited_text.strip()):
+                                 should_skip = True
+
+                        if should_skip:
+                            self.logger.debug(f"Edit skipped (Duplicate content) for {backup_msg_id}")
                             return 
 
+                        self.logger.info(f"Applying edit to {backup_msg_id}")
                         new_text = f"{current_text}\n\n{edit_entry}" if current_text else edit_entry
                         await self.client.edit_message(target_id, backup_msg_id, new_text)
                             
@@ -386,6 +640,75 @@ class MessageHandler:
 
             # Legacy / Fallback path (should not be hit with new dispatcher)
             pass
+
+    async def handle_reaction(self, event, target_info_list):
+        """处理表情反应"""
+        try:
+            msg_id = event.msg_id
+            chat_id = event.chat_id
+            self.logger.info(f"Reaction event received: Source {chat_id} Msg {msg_id}")
+
+            # We need to map Source Msg ID -> Target Msg ID
+            backups = self.mapper.get_backup_msgs(chat_id, msg_id)
+            if not backups:
+                return
+                
+            # Dispatch
+            for backup in backups:
+                target_id = backup['backup_chat_id']
+                topic_id = backup.get('target_topic_id')
+                queue_key = (target_id, topic_id)
+                
+                queue = await self._get_queue(queue_key)
+                await queue.put(('reaction', (event, target_id, backup)))
+
+        except Exception as e:
+            self.logger.error(f"Error dispatching reaction: {e}")
+
+    async def _process_reaction_target(self, event, target_id, backup_entry):
+        try:
+            self.logger.info(f"Processing reaction for Target {target_id} BackupEntry {backup_entry.get('backup_msg_id')}")
+            # Check ID
+            if str(backup_entry['backup_chat_id']) != str(target_id):
+                return
+            
+            backup_msg_id = backup_entry['backup_msg_id']
+            # Get reaction
+            # The event object varies.
+            # Assuming event is MessageReact? No, it's usually Raw or specific.
+            # If using events.CallbackQuery NO.
+            # If using standard events, we need the reaction value.
+            # Telethon Raw UpdateMessageReactions.
+            # However, simpler if we just READ the message reactions?
+            # Or use event.reaction string/emoticon?
+            # Let's assume passed event is `events.Reaction` if available, or we inspect it.
+            
+            # If we simply want to "follow", we assume event has `.reaction` or similar.
+            # If the user toggled, we might need to check if added or removed.
+            # But user said "only keep one".
+            # So whatever reaction happened, set it?
+            
+            reaction = None
+            if hasattr(event, 'reaction'):
+                # event.reaction is a specific reaction object or list?
+                # On Reaction event it's typically the reaction changed.
+                # Just taking the reaction from the event.
+                reaction = event.reaction
+            
+            # If reaction is emtpy/None, it might be a removal.
+            # If removal, we should clear reactions?
+            # Telethon: client.send_reaction(chat, msg, reaction=None) clears?
+            
+            # Wrap in list for SendReactionRequest
+            reactions_list = [reaction] if reaction else []
+            await self.client(SendReactionRequest(
+                peer=target_id, 
+                msg_id=backup_msg_id, 
+                reaction=reactions_list
+            ))
+            
+        except Exception as e:
+            self.logger.error(f"Reaction sync failed {backup_entry}: {e}")
 
     def _is_auto_delete_ignored(self, timestamp_str):
         if not timestamp_str: return False
