@@ -3,6 +3,7 @@
 
 # 配置文件
 telebot/group_backup_config.yml
+.vscode/
 
 # 环境
 venv/
