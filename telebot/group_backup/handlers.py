@@ -149,6 +149,10 @@ class MessageHandler:
         """处理单个目标的转发逻辑"""
         try:
             sender = await message.get_sender()
+            try:
+                chat = await message.get_chat()
+            except Exception:
+                chat = None
         except Exception as e:
             self.logger.warning(f"Failed to get sender for {message.id}: {e}")
             sender = None
@@ -193,7 +197,7 @@ class MessageHandler:
 
         header = ""
         if should_send_header:
-            header = self._build_message_header(sender, target_info, msg_date, timezone_str, bool(message.edit_date), message.fwd_from)
+            header = self._build_message_header(sender, target_info, msg_date, timezone_str, chat, message.id, bool(message.edit_date), message.fwd_from)
             # Remove separator if rich media?
             # Original logic: separator = "" if is_rich_media else ...
             if is_rich_media:
@@ -244,6 +248,10 @@ class MessageHandler:
         # Fetch sender (try first msg)
         try:
             sender = await first_msg.get_sender()
+            try:
+                chat = await first_msg.get_chat()
+            except Exception:
+                chat = None
         except:
             sender = None
         sender_id = sender.id if sender else 0
@@ -279,7 +287,7 @@ class MessageHandler:
         if should_send_header:
             header = self._build_message_header(
                 sender, target_info, msg_date, timezone_str, 
-                bool(first_msg.edit_date), first_msg.fwd_from
+                chat, first_msg.id, bool(first_msg.edit_date), first_msg.fwd_from
             )
             # Albums are always rich media, so strip separator
             header = header.replace("─" * 30 + "\n", "")
@@ -400,7 +408,7 @@ class MessageHandler:
             return f"🧑[{sender_name[0]}]"
         return "🧑"
 
-    def _build_message_header(self, sender, target_info, msg_date, timezone_str, is_edit=False, fwd_from=None):
+    def _build_message_header(self, sender, target_info, msg_date, timezone_str, chat, message_id, is_edit=False, fwd_from=None):
         sender_name = getattr(sender, 'first_name', 'Unknown')
         if hasattr(sender, 'last_name') and sender.last_name:
             sender_name += f" {sender.last_name}"
@@ -416,6 +424,22 @@ class MessageHandler:
         
         time_str_full = msg_date.strftime('%Y-%m-%d %H:%M:%S')
         header += f"\n🕐 {time_str_full} ({timezone_str})\n"
+        
+        if chat:
+            link = ""
+            if getattr(chat, "username", None):
+                link = f"https://t.me/{chat.username}/{message_id}"
+            else:
+                cid = str(chat.id)
+                if cid.startswith("-100"):
+                    cid = cid[4:]
+                elif cid.startswith("-"):
+                    cid = cid[1:]
+                if cid:
+                     link = f"https://t.me/c/{cid}/{message_id}"
+            
+            if link:
+                header += f"🔗 [跳转原文]({link})\n"
         
         if is_edit:
             header += "✏️ (已编辑)\n"
