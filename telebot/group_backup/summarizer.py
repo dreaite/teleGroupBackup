@@ -134,8 +134,6 @@ class GroupSummarizer:
         for u in raw_focus:
             focus_users.add(str(u))
             
-        found_focus_names = set()
-
         for m in msgs:
             clean_source_id = str(source_id)
             if clean_source_id.startswith("-100"):
@@ -157,7 +155,6 @@ class GroupSummarizer:
             msg_header = f"Msg: {text_content}"
             if is_followed:
                 msg_header = f"Msg (Followed User {sender_name}): {text_content}"
-                found_focus_names.add(sender_name)
             elif sender_name and sender_name != 'Unknown':
                  msg_header = f"Msg ({sender_name}): {text_content}"
                 
@@ -174,18 +171,14 @@ class GroupSummarizer:
         
         custom_prompt = self.summary_config.get('prompt')
         
-        # Inject emphasis instructions if focus users found
-        if found_focus_names:
-            names_list = ", ".join(found_focus_names)
+        # Always append emphasis instruction if custom prompt is used
+        if custom_prompt:
             emphasis = (
-                f"\n\nIMPORTANT: The following users are 'Followed Users': {names_list}. "
-                "You MUST give their messages higher weight. "
-                "When summarizing, explicitly mention their names and what they said."
+                "\n\nNote: Messages marked with '(Followed User ...)' are from high-priority users. "
+                "You MUST give these users' messages higher weight in the summary. "
+                "Explicitly mention their names and summarize what they discussed."
             )
-            if custom_prompt:
-                custom_prompt += emphasis
-            else:
-                 custom_prompt = "Summarize the chat log." + emphasis
+            custom_prompt += emphasis
         
         summary_content = await self.provider.generate_summary(context_text, custom_prompt)
         
