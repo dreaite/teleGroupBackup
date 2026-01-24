@@ -134,6 +134,26 @@ class GroupSummarizer:
         for u in raw_focus:
             focus_users.add(str(u))
             
+        # Resolve Sender Names dynamically (to avoid polluting backup files)
+        sender_ids = set()
+        for m in msgs:
+            sid = m.get('sender_id')
+            if sid: sender_ids.add(int(sid))
+            
+        sender_map = {}
+        if sender_ids and self.client:
+            try:
+                users = await self.client.get_entity(list(sender_ids))
+                if not isinstance(users, list): users = [users]
+                
+                for u in users:
+                    name = getattr(u, 'first_name', '') or ''
+                    if getattr(u, 'last_name', None):
+                        name += f" {u.last_name}"
+                    sender_map[u.id] = name.strip() or "Unknown"
+            except Exception as e:
+                self.logger.warning(f"Failed to resolve sender names for summary: {e}")
+
         for m in msgs:
             clean_source_id = str(source_id)
             if clean_source_id.startswith("-100"):
@@ -147,8 +167,10 @@ class GroupSummarizer:
                 text_content = text_content[:500] + "..."
             
             # Check for followed user
-            sender_id = str(m.get('sender_id', ''))
-            sender_name = m.get('sender_name', 'Unknown')
+            sender_id_raw = m.get('sender_id')
+            sender_id = str(sender_id_raw) if sender_id_raw else ''
+            
+            sender_name = sender_map.get(sender_id_raw, 'Unknown') if sender_id_raw else 'Unknown'
             
             is_followed = sender_id in focus_users
             
