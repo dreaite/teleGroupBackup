@@ -1,11 +1,12 @@
 import logging
 import json
-import asyncio
 from pathlib import Path
 from datetime import datetime
-import pytz
 
 from telebot.ai_sdk import get_ai_provider
+
+TELEGRAM_MESSAGE_LIMIT = 4096
+TELEGRAM_SAFE_MESSAGE_LIMIT = 3800
 
 class GroupSummarizer:
     def __init__(self, client, config, mapper, logger=None):
@@ -20,6 +21,7 @@ class GroupSummarizer:
         
         # State tracking for processed files
         self.data_dir = Path(config.get('settings', {}).get('backup_schedule', {}).get('local_export_dir', './data/exports'))
+        self.summary_dir = self.data_dir / "summaries"
         self.state_file = self.data_dir / "summary_state.json"
         self.processed_files = self._load_state()
         self.focus_users = self._parse_focus_users()
@@ -91,13 +93,24 @@ class GroupSummarizer:
                 source_groups[source_id] = []
             source_groups[source_id].append(msg)
 
-        # Process each Source
-        for source_id, msgs in source_groups.items():
-            await self._summarize_source(source_id, msgs, file_key)
+        if not source_groups:
+            self.logger.warning(f"No mapped source messages found for summary file {file_key}")
+            self.processed_files.add(file_key)
+            self._save_state()
+            return
 
-        # Mark as done
-        self.processed_files.add(file_key)
-        self._save_state()
+        # Process each Source
+        all_sent = True
+        for source_id, msgs in source_groups.items():
+            if not await self._summarize_source(source_id, msgs, file_key):
+                all_sent = False
+
+        # Mark as done only after all summaries were sent successfully.
+        if all_sent:
+            self.processed_files.add(file_key)
+            self._save_state()
+        else:
+            self.logger.warning(f"Summary file {file_key} was not marked processed because sending failed")
 
     async def _summarize_source(self, source_id, msgs, file_key):
         # Find Source Config
@@ -122,7 +135,7 @@ class GroupSummarizer:
                 summary_target_id = t
             else:
                 self.logger.warning(f"No target found for summary of source {source_id}")
-                return
+                return False
 
         # Parse Target ID / Topic
         target_chat_id = None
@@ -139,7 +152,7 @@ class GroupSummarizer:
                  target_chat_id = int(summary_target_id)
         
         if not target_chat_id:
-            return
+            return False
 
         # Prepare Content for AI
         formatted_lines = []
@@ -205,7 +218,7 @@ class GroupSummarizer:
 
         context_text = "\n".join(formatted_lines)
         if not context_text.strip():
-            return
+            return True
 
         # Prompt
         group_tag = source_conf.get('tag', '')
@@ -224,21 +237,216 @@ class GroupSummarizer:
             custom_prompt += emphasis
         
         summary_content = await self.provider.generate_summary(context_text, custom_prompt)
+        if self._is_provider_error(summary_content):
+            self.logger.error(f"Failed to generate summary for {source_id}: {summary_content}")
+            return False
         
         # Build Final Message
         final_msg = f"#总结 {group_tag} #date_{date_str}\n\n{summary_content}"
-        
-        # Send
+
+        return await self._send_summary(
+            target_chat_id=target_chat_id,
+            target_topic_id=target_topic_id,
+            source_id=source_id,
+            file_key=file_key,
+            group_tag=group_tag,
+            date_str=date_str,
+            final_msg=final_msg,
+            summary_content=summary_content,
+        )
+
+    async def _send_summary(
+        self,
+        target_chat_id: int,
+        target_topic_id: int | None,
+        source_id: int | str,
+        file_key: str,
+        group_tag: str,
+        date_str: str,
+        final_msg: str,
+        summary_content: str,
+    ) -> bool:
+        """Send a summary, falling back to a Markdown attachment when it is too long."""
+        if len(final_msg) > TELEGRAM_MESSAGE_LIMIT:
+            self.logger.warning(
+                f"Summary for {source_id} is too long ({len(final_msg)} chars); using Markdown fallback"
+            )
+            return await self._send_long_summary_fallback(
+                target_chat_id=target_chat_id,
+                target_topic_id=target_topic_id,
+                source_id=source_id,
+                file_key=file_key,
+                group_tag=group_tag,
+                date_str=date_str,
+                summary_content=summary_content,
+            )
+
         try:
-            await self.client.send_message(
+            await self._send_rendered_message(
                 target_chat_id,
                 final_msg,
                 reply_to=target_topic_id,
-                link_preview=False
             )
             self.logger.info(f"Sent summary for {source_id} to {target_chat_id}")
+            return True
         except Exception as e:
-            self.logger.error(f"Failed to send summary: {e}")
+            if self._is_message_too_long_error(e):
+                self.logger.warning(
+                    f"Summary for {source_id} exceeded Telegram limit during send; using Markdown fallback"
+                )
+                return await self._send_long_summary_fallback(
+                    target_chat_id=target_chat_id,
+                    target_topic_id=target_topic_id,
+                    source_id=source_id,
+                    file_key=file_key,
+                    group_tag=group_tag,
+                    date_str=date_str,
+                    summary_content=summary_content,
+                )
+
+            self.logger.error(f"Failed to send summary: {e}", exc_info=True)
+            return False
+
+    async def _send_long_summary_fallback(
+        self,
+        target_chat_id: int,
+        target_topic_id: int | None,
+        source_id: int | str,
+        file_key: str,
+        group_tag: str,
+        date_str: str,
+        summary_content: str,
+    ) -> bool:
+        """Attach the full Markdown summary and send a shorter second-pass summary."""
+        try:
+            md_path = self._write_markdown_summary(
+                source_id=source_id,
+                file_key=file_key,
+                group_tag=group_tag,
+                date_str=date_str,
+                summary_content=summary_content,
+            )
+            condensed_content = await self._generate_condensed_summary(summary_content)
+            if self._is_provider_error(condensed_content):
+                self.logger.error(f"Failed to generate condensed summary for {source_id}: {condensed_content}")
+                condensed_content = (
+                    "完整总结已生成，但二次压缩失败。请查看 Markdown 附件获取完整内容。"
+                )
+            condensed_msg = (
+                f"#总结 {group_tag} #date_{date_str}\n\n"
+                f"{condensed_content}\n\n"
+                "完整总结过长，已保存为 Markdown 附件。"
+            )
+            condensed_msg = self._trim_for_telegram(condensed_msg)
+
+            await self._send_rendered_message(
+                target_chat_id,
+                condensed_msg,
+                reply_to=target_topic_id,
+            )
+            await self.client.send_file(
+                target_chat_id,
+                str(md_path),
+                caption=f"#总结 {group_tag} #date_{date_str}\n完整 Markdown 总结",
+                reply_to=target_topic_id,
+            )
+            self.logger.info(f"Sent condensed summary and Markdown attachment for {source_id} to {target_chat_id}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to send long-summary fallback: {e}", exc_info=True)
+            return False
+
+    async def _send_rendered_message(
+        self,
+        target_chat_id: int,
+        message: str,
+        reply_to: int | None = None,
+    ) -> None:
+        """Send message text with Telegram Markdown rendering, falling back to plain text."""
+        try:
+            await self.client.send_message(
+                target_chat_id,
+                message,
+                reply_to=reply_to,
+                link_preview=False,
+                parse_mode='md',
+            )
+        except Exception as e:
+            if not self._is_markdown_parse_error(e):
+                raise
+
+            self.logger.warning(f"Markdown parse failed; sending plain text instead: {e}")
+            await self.client.send_message(
+                target_chat_id,
+                message,
+                reply_to=reply_to,
+                link_preview=False,
+            )
+
+    async def _generate_condensed_summary(self, summary_content: str) -> str:
+        prompt = (
+            "你会收到一份已经生成的 Telegram 群组每日总结。请把它再次压缩成适合 Telegram "
+            "单条消息发送的简短版本。\n"
+            "要求：\n"
+            "1. 使用中文输出。\n"
+            "2. 保留最重要的主题、结论、行动项、风险和重点关注用户发言。\n"
+            "3. 尽量保留关键 SourceLink，但不要为每个细节都保留链接。\n"
+            "4. 控制在 2500 个中文字符以内。\n"
+            "5. 不要提及你在压缩总结。"
+        )
+        return await self.provider.generate_summary(summary_content, prompt)
+
+    def _write_markdown_summary(
+        self,
+        source_id: int | str,
+        file_key: str,
+        group_tag: str,
+        date_str: str,
+        summary_content: str,
+    ) -> Path:
+        self.summary_dir.mkdir(parents=True, exist_ok=True)
+        safe_source_id = self._safe_filename(str(source_id))
+        safe_file_key = self._safe_filename(file_key.removesuffix(".bak"))
+        md_path = self.summary_dir / f"{safe_file_key}_{safe_source_id}_summary.md"
+
+        with open(md_path, 'w', encoding='utf-8') as f:
+            f.write(f"# 总结 {group_tag} #date_{date_str}\n\n")
+            f.write(f"- Source ID: `{source_id}`\n")
+            f.write(f"- Backup file: `{file_key}`\n")
+            f.write(f"- Generated at: `{datetime.now().isoformat()}`\n\n")
+            f.write(summary_content)
+            f.write("\n")
+
+        return md_path
+
+    def _safe_filename(self, value: str) -> str:
+        return "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in value).strip("_") or "summary"
+
+    def _trim_for_telegram(self, text: str) -> str:
+        if len(text) <= TELEGRAM_SAFE_MESSAGE_LIMIT:
+            return text
+
+        suffix = "\n\n[内容仍过长，已截断；完整版本见 Markdown 附件。]"
+        return text[:TELEGRAM_SAFE_MESSAGE_LIMIT - len(suffix)] + suffix
+
+    def _is_message_too_long_error(self, error: Exception) -> bool:
+        err_text = str(error).lower()
+        return "message was too long" in err_text or "message_too_long" in err_text
+
+    def _is_markdown_parse_error(self, error: Exception) -> bool:
+        err_text = str(error).lower()
+        return (
+            "can't parse" in err_text
+            or "parse" in err_text and "entities" in err_text
+            or "entityboundsinvalid" in err_text
+            or "entity bounds invalid" in err_text
+        )
+
+    def _is_provider_error(self, content: str | None) -> bool:
+        if not content:
+            return True
+
+        return content.startswith("Error generating summary:")
 
     async def run_batch_backfill(self):
         """Check all .bak files and process if missing."""
