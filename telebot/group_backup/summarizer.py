@@ -17,7 +17,10 @@ class GroupSummarizer:
         
         self.summary_config = config.get('summary', {})
         self.enabled = self.summary_config.get('enabled', False)
-        self.provider = get_ai_provider(self.summary_config)
+        self.provider = get_ai_provider(self.summary_config) if self.enabled else None
+        if self.enabled and not self.provider:
+            provider_name = self.summary_config.get('provider', 'openai')
+            self.logger.error(f"Summary is enabled but AI provider is unavailable: {provider_name}")
         
         # State tracking for processed files
         self.data_dir = Path(config.get('settings', {}).get('backup_schedule', {}).get('local_export_dir', './data/exports'))

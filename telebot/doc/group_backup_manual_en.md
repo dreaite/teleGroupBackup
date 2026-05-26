@@ -52,6 +52,27 @@ groups:
     name: "My Group"
 ```
 
+#### 4. Summary Configuration
+The summary feature selects its processor through `summary.provider`. OpenAI remains supported, and
+local Codex CLI can be used with `codex_cli`.
+
+```yaml
+summary:
+  enabled: true
+  provider: "codex_cli"
+  codex_command: "/usr/local/bin/codex"
+  model: "gpt-5.5"          # Optional; omit to use the Codex CLI default.
+  codex_timeout_seconds: 900
+  codex_sandbox: "read-only"
+  codex_approval_policy: "never"
+  codex_ephemeral: true
+  codex_skip_git_repo_check: true
+```
+
+The Codex CLI provider runs `codex exec`, passes the chat log through stdin, and reads the final
+response from a temporary output file. The service user must already be logged in or configured for
+Codex CLI.
+
 ## 🛠 Features
 
 ### 1. Message Forwarding

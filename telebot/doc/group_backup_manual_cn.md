@@ -52,6 +52,25 @@ groups:
     name: "我的群组"
 ```
 
+#### 4. 总结配置
+总结功能通过 `summary.provider` 选择处理方式。默认仍可使用 OpenAI，也可以改为本地 Codex CLI。
+
+```yaml
+summary:
+  enabled: true
+  provider: "codex_cli"
+  codex_command: "/usr/local/bin/codex"
+  model: "gpt-5.5"          # 可选；不填则使用 Codex CLI 默认模型
+  codex_timeout_seconds: 900
+  codex_sandbox: "read-only"
+  codex_approval_policy: "never"
+  codex_ephemeral: true
+  codex_skip_git_repo_check: true
+```
+
+Codex CLI provider 会调用 `codex exec`，从标准输入传入待总结内容，并通过临时文件读取最终回复。
+服务运行用户需要已经完成 Codex CLI 登录或配置。
+
 ## 🛠 功能介绍
 
 ### 1. 消息转发

@@ -54,12 +54,24 @@ groups:
 # Summary Configuration
 summary:
   enabled: false
-  provider: "openai" # "openai" or other providers
+  provider: "openai" # "openai", "codex_cli", or other providers
   api_key: "your_api_key"
   base_url: "https://api.openai.com/v1" # Optional
   model: "gpt-3.5-turbo"
   prompt: "Optional custom system prompt"
   focus_users: [123456789, 987654321] # Optional: List of user IDs to emphasize in summary
+
+  # Codex CLI provider example:
+  # provider: "codex_cli"
+  # codex_command: "/usr/local/bin/codex" # Or simply "codex" if PATH is configured for the service user.
+  # model: "gpt-5.5" # Optional; omit to use the local Codex CLI default.
+  # codex_timeout_seconds: 900
+  # codex_sandbox: "read-only"
+  # codex_approval_policy: "never"
+  # codex_ephemeral: true
+  # codex_skip_git_repo_check: true
+  # codex_working_dir: "/home/dreaife/dev/infra/group-backup-bot" # Optional.
+  # codex_extra_args: [] # Optional extra args passed before the prompt.
 
 # Note: Add 'summary_target: ID' to specific groups if needed.
 # If not specified, summary will be sent to the first target group.
