@@ -1,0 +1,17 @@
+[Unit]
+Description=Telegram Group Backup (User Service)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/dreaife/dev/infra/group-backup-bot
+Environment="PATH=/usr/bin:/usr/local/bin"
+ExecStartPre=/bin/mkdir -p /home/dreaife/.hermes-docker/generated/group_backup/logs /home/dreaife/.hermes-docker/generated/group_backup/backups
+ExecStart=/home/dreaife/dev/infra/group-backup-bot/venv/bin/python /home/dreaife/dev/infra/group-backup-bot/telebot/group_backup_bot.py --session-name group_backup --log-dir /home/dreaife/.hermes-docker/generated/group_backup/logs --data-dir /home/dreaife/.hermes-docker/generated/group_backup
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

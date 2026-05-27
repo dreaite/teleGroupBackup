@@ -67,7 +67,7 @@ summary:
   # model: "gpt-5.5" # Optional; omit to use the local Codex CLI default.
   # codex_timeout_seconds: 900
   # codex_sandbox: "read-only"
-  # codex_approval_policy: "never"
+  # codex_approval_policy: "never" # Optional; only for Codex CLI versions that support it.
   # codex_ephemeral: true
   # codex_skip_git_repo_check: true
   # codex_working_dir: "/home/dreaife/dev/infra/group-backup-bot" # Optional.

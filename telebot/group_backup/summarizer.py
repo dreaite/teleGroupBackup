@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 from datetime import datetime
 
+import pytz
+
 from telebot.ai_sdk import get_ai_provider
 
 TELEGRAM_MESSAGE_LIMIT = 4096
@@ -26,6 +28,7 @@ class GroupSummarizer:
         self.data_dir = Path(config.get('settings', {}).get('backup_schedule', {}).get('local_export_dir', './data/exports'))
         self.summary_dir = self.data_dir / "summaries"
         self.state_file = self.data_dir / "summary_state.json"
+        self.state_loaded_at = self._get_state_mtime()
         self.processed_files = self._load_state()
         self.focus_users = self._parse_focus_users()
 
@@ -59,7 +62,8 @@ class GroupSummarizer:
             return
 
         file_key = file_path.name
-        if file_key in self.processed_files:
+        processed_key = self._get_processed_key(file_path)
+        if self._is_already_processed(file_path, file_key, processed_key):
             return
 
         self.logger.info(f"Generating summary for {file_key}...")
@@ -110,7 +114,7 @@ class GroupSummarizer:
 
         # Mark as done only after all summaries were sent successfully.
         if all_sent:
-            self.processed_files.add(file_key)
+            self.processed_files.add(processed_key)
             self._save_state()
         else:
             self.logger.warning(f"Summary file {file_key} was not marked processed because sending failed")
@@ -226,7 +230,7 @@ class GroupSummarizer:
         # Prompt
         group_tag = source_conf.get('tag', '')
         # Fix date format for tags (YYYY_MM_DD)
-        date_str = datetime.now().strftime('%Y_%m_%d')
+        date_str = self._now_in_config_timezone().strftime('%Y_%m_%d')
         
         custom_prompt = self.summary_config.get('prompt')
         
@@ -425,6 +429,39 @@ class GroupSummarizer:
     def _safe_filename(self, value: str) -> str:
         return "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in value).strip("_") or "summary"
 
+    def _get_state_mtime(self) -> float:
+        try:
+            return self.state_file.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def _get_processed_key(self, file_path: Path) -> str:
+        try:
+            stat = file_path.stat()
+            return f"{file_path.name}:{stat.st_mtime_ns}:{stat.st_size}"
+        except OSError:
+            return file_path.name
+
+    def _is_already_processed(self, file_path: Path, file_key: str, processed_key: str) -> bool:
+        if processed_key in self.processed_files:
+            return True
+
+        if file_key not in self.processed_files:
+            return False
+
+        try:
+            return file_path.stat().st_mtime <= self.state_loaded_at
+        except OSError:
+            return True
+
+    def _now_in_config_timezone(self) -> datetime:
+        timezone_name = self.config.get('settings', {}).get('timezone', 'UTC')
+        try:
+            return datetime.now(pytz.timezone(timezone_name))
+        except Exception:
+            self.logger.warning(f"Invalid timezone configured: {timezone_name}; falling back to system time")
+            return datetime.now()
+
     def _trim_for_telegram(self, text: str) -> str:
         if len(text) <= TELEGRAM_SAFE_MESSAGE_LIMIT:
             return text
@@ -459,7 +496,9 @@ class GroupSummarizer:
         self.logger.info("Starting summary scan...")
         # Get all daily files
         for file_path in self.data_dir.glob("*_daily.bak"):
-             if file_path.name in self.processed_files:
+             file_key = file_path.name
+             processed_key = self._get_processed_key(file_path)
+             if self._is_already_processed(file_path, file_key, processed_key):
                  continue
 
              # Look for metadata file

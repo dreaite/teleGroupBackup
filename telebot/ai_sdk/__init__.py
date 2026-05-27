@@ -22,7 +22,7 @@ def get_ai_provider(config: dict) -> AIProvider | None:
             working_dir=config.get('codex_working_dir'),
             timeout_seconds=config.get('codex_timeout_seconds', config.get('timeout_seconds', 900)),
             sandbox=config.get('codex_sandbox', 'read-only'),
-            approval_policy=config.get('codex_approval_policy', 'never'),
+            approval_policy=config.get('codex_approval_policy'),
             ephemeral=config.get('codex_ephemeral', True),
             skip_git_repo_check=config.get('codex_skip_git_repo_check', True),
             extra_args=config.get('codex_extra_args', config.get('extra_args')),

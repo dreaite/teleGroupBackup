@@ -63,7 +63,6 @@ summary:
   model: "gpt-5.5"          # 可选；不填则使用 Codex CLI 默认模型
   codex_timeout_seconds: 900
   codex_sandbox: "read-only"
-  codex_approval_policy: "never"
   codex_ephemeral: true
   codex_skip_git_repo_check: true
 ```

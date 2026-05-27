@@ -5,8 +5,10 @@ After=network.target
 [Service]
 Type=simple
 User=dreaife
-WorkingDirectory=/home/dreaife/bot
-ExecStart=/home/dreaife/bot/venv/bin/python /home/dreaife/bot/telebot/group_backup_bot.py --session-name group_backup
+WorkingDirectory=/home/dreaife/dev/infra/group-backup-bot
+ExecStartPre=+/bin/mkdir -p /logs/bot/group_backup /data/bot/group_backup
+ExecStartPre=+/bin/chown -R dreaife:dreaife /logs/bot/group_backup /data/bot/group_backup
+ExecStart=/home/dreaife/dev/infra/group-backup-bot/venv/bin/python /home/dreaife/dev/infra/group-backup-bot/telebot/group_backup_bot.py --session-name group_backup
 Restart=always
 RestartSec=10
 StandardOutput=journal

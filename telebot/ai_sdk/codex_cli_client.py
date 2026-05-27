@@ -20,7 +20,7 @@ class CodexCLIClient(AIProvider):
         working_dir: str | None = None,
         timeout_seconds: int = 900,
         sandbox: str = "read-only",
-        approval_policy: str = "never",
+        approval_policy: str | None = None,
         ephemeral: bool = True,
         skip_git_repo_check: bool = True,
         extra_args: list[str] | str | None = None,

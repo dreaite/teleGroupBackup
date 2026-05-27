@@ -64,7 +64,6 @@ summary:
   model: "gpt-5.5"          # Optional; omit to use the Codex CLI default.
   codex_timeout_seconds: 900
   codex_sandbox: "read-only"
-  codex_approval_policy: "never"
   codex_ephemeral: true
   codex_skip_git_repo_check: true
 ```

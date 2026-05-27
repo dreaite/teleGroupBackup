@@ -172,7 +172,7 @@ class GroupBackupClient:
             chat_title = str(chat_id)
             
         safe_title = "".join([c for c in chat_title if c.isalnum() or c in (' ', '-', '_')]).strip()
-        date_str = datetime.now().strftime('%Y-%m-%d')
+        date_str = self._now_in_config_timezone().strftime('%Y-%m-%d')
         
         if topic_id:
             filename = f"{safe_title}_{topic_id}_{date_str}{suffix}.bak"
@@ -339,3 +339,11 @@ class GroupBackupClient:
 
     def run(self):
         asyncio.run(self.start())
+
+    def _now_in_config_timezone(self):
+        timezone_name = self.config.get('settings', {}).get('timezone', 'UTC')
+        try:
+            return datetime.now(pytz.timezone(timezone_name))
+        except Exception:
+            self.logger.warning(f"Invalid timezone configured: {timezone_name}; falling back to system time")
+            return datetime.now()
